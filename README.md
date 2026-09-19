@@ -1,6 +1,6 @@
 # ENTRA MCP — the first agent-ready job platform
 
-Let your AI find your job. This MCP server connects Claude, Cursor, Windsurf or any MCP client to **ENTRA** — 15,000+ verified AI & tech jobs aggregated straight from company hiring systems (OpenAI, Anthropic, SpaceX, Stripe + 300 more). **Zero ghost jobs.**
+Let your AI find your job. This MCP server connects Claude, Cursor, Windsurf or any MCP client to **ENTRA** — thousands of verified AI & tech jobs aggregated straight from company hiring systems (OpenAI, Anthropic, SpaceX, Stripe + 300 more). **Zero ghost jobs.**
 
 Agents search, match, rank and prepare. **Humans decide and apply** — no spam, no auto-submission.
 

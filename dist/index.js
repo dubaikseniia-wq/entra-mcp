@@ -880,7 +880,7 @@ const server = new McpServer({ name: 'entra', version: VERSION });
 const RO = { readOnlyHint: true, idempotentHint: true, openWorldHint: true };
 server.registerTool('search_jobs', {
     title: 'Search ENTRA jobs',
-    description: 'Search 15,000+ verified AI & tech jobs on ENTRA (aggregated directly from company hiring systems — zero ghost jobs). Filters: work location, country, company, annual salary, experience, posted_within_days. rank_by date | salary | fit (fit needs profile_keywords). Returns total_found and live roles with salary bands and apply links.',
+    description: 'Search thousands of verified AI & tech jobs on ENTRA (aggregated directly from company hiring systems — zero ghost jobs). Filters: work location, country, company, annual salary, experience, posted_within_days. rank_by date | salary | fit (fit needs profile_keywords). Returns total_found and live roles with salary bands and apply links.',
     inputSchema: searchShape,
     annotations: RO,
 }, guarded(runSearchJobs));
