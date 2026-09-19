@@ -1,0 +1,49 @@
+{
+  "name": "entra-mcp",
+  "version": "0.2.0",
+  "description": "MCP server for ENTRA — the agent-ready job platform. Search, match and rank 15,000+ verified AI & tech jobs aggregated straight from company ATSs (OpenAI, Anthropic, Stripe, SpaceX…). Salary stats, companies hiring, human-in-the-loop apply links.",
+  "type": "module",
+  "bin": {
+    "entra-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "selftest": "node dist/index.js --selftest",
+    "smoke": "node scripts/smoke.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "jobs",
+    "hiring",
+    "ai",
+    "claude",
+    "agents",
+    "careers",
+    "ats",
+    "recruiting",
+    "entra"
+  ],
+  "author": "ENTRA (https://entracareers.com)",
+  "license": "MIT",
+  "homepage": "https://entracareers.com/developers",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}
