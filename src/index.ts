@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 /**
  * ENTRA MCP Server — the first agent-ready job platform.
- * Read-only wrapper over the public ENTRA REST API (entracareers.com).
+ * Wrapper over the ENTRA REST API (entracareers.com).
  *
- * Tools: search_jobs · get_job · list_companies · match_jobs · match_profile (alias)
- *        · salary_stats · companies_hiring · prepare_application
+ * Candidate mode (default, no key, read-only):
+ *   search_jobs · get_job · list_companies · match_jobs · match_profile (alias)
+ *   · salary_stats · companies_hiring · prepare_application
+ *
+ * Employer mode (ENTRA_API_KEY set — adds, never replaces):
+ *   employer_whoami · post_job · my_jobs · close_job · update_job · job_applications
+ *   · search_candidates · match_candidates
  *
  * Human-in-the-loop by design: agents find and rank, humans decide and apply.
  * Matching is deterministic (keyword dictionary + rules) — no LLM, no invented numbers.
@@ -13,47 +18,108 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const API = (process.env.ENTRA_API_URL ?? 'https://entracareers.com/api').replace(/\/+$/, '');
 const SITE = (process.env.ENTRA_SITE_URL ?? 'https://entracareers.com').replace(/\/+$/, '');
 const UTM = 'utm_source=agent&utm_medium=mcp';
 const SOURCE_NOTE = 'ENTRA — verified roles aggregated from company ATSs. Finds and ranks; you apply.';
 
+// Employer mode: the key comes from the environment only (never from argv — argv leaks into process lists).
+const API_KEY = (process.env.ENTRA_API_KEY ?? '').trim();
+const EMPLOYER_FLAG = process.argv.includes('--employer');
+const EMPLOYER_MODE = API_KEY.length > 0;
+const API_KEYS_URL = `${SITE}/employer/profile?tab=api-keys`;
+const PRICING_URL = `${SITE}/employer/pricing`;
+
 // ---------- API layer ----------
 type Json = Record<string, unknown>;
-type Params = Record<string, string | number | boolean | undefined>;
+type ParamValue = string | number | boolean | undefined | null | Array<string | number>;
+type Params = Record<string, ParamValue>;
 
 class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public code: string | null = null,
+    public hint: string | null = null,
+    public validation: unknown = undefined,
   ) {
     super(message);
     this.name = 'ApiError';
   }
 }
 
-async function apiGet<T = Json>(path: string, params: Params = {}): Promise<T> {
-  const url = new URL(API + path);
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+const SUBSCRIPTION_RE = /vacancy limit|subscription|upgrade your plan|resume database access/i;
+const isSubscription403 = (e: unknown) => e instanceof ApiError && e.status === 403 && SUBSCRIPTION_RE.test(e.message);
+
+function hintFor(status: number, message: string): string | null {
+  if (status === 401) {
+    return EMPLOYER_MODE
+      ? `ENTRA_API_KEY was rejected (invalid or revoked). Create a new key at ${API_KEYS_URL} and restart the MCP server with the new ENTRA_API_KEY.`
+      : `This endpoint needs an employer API key. Create one at ${API_KEYS_URL} and set ENTRA_API_KEY.`;
   }
+  if (status === 403) {
+    const scope = /required scope:\s*([a-z]+:[a-z]+)/i.exec(message)?.[1];
+    if (scope) return `The API key lacks the "${scope}" scope. Create a key with that scope at ${API_KEYS_URL}.`;
+    if (/not available with API key/i.test(message)) return 'This endpoint is not enabled for API keys (browser session only).';
+    if (SUBSCRIPTION_RE.test(message)) return `Needs an active employer plan — see ${PRICING_URL}.`;
+    return 'Forbidden — the key may belong to another company or the key owner lost the manager role.';
+  }
+  if (status === 429) return 'Rate limit: 120 requests/minute per API key. Wait a minute and retry (the server already retried once).';
+  if (status === 400) return 'Validation failed — check the "validation" field for the offending fields.';
+  return null;
+}
+
+type FetchOpts = { method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'; params?: Params; body?: unknown; auth?: boolean };
+
+/** One HTTP entry point. The bearer key is attached ONLY when `auth: true` (public routes reject keys by default). */
+async function apiFetch<T = Json>(path: string, opts: FetchOpts = {}, attempt = 0): Promise<T> {
+  const url = new URL(API + path);
+  for (const [k, v] of Object.entries(opts.params ?? {})) {
+    if (v === undefined || v === null || v === '') continue;
+    if (Array.isArray(v)) for (const item of v) url.searchParams.append(k, String(item));
+    else url.searchParams.set(k, String(v));
+  }
+  const headers: Record<string, string> = { accept: 'application/json', 'user-agent': `entra-mcp/${VERSION} (+${SITE})` };
+  if (opts.auth) {
+    if (!API_KEY) throw new ApiError(401, 'No ENTRA_API_KEY set', 'AUTH_ERROR', hintFor(401, ''));
+    headers.authorization = `Bearer ${API_KEY}`;
+  }
+  if (opts.body !== undefined) headers['content-type'] = 'application/json';
   const res = await fetch(url, {
-    headers: { accept: 'application/json', 'user-agent': `entra-mcp/${VERSION} (+${SITE})` },
+    method: opts.method ?? 'GET',
+    headers,
+    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
     signal: AbortSignal.timeout(25_000),
   });
+  if (res.status === 429 && attempt === 0) {
+    const ra = Number(res.headers.get('retry-after') ?? '1');
+    const waitMs = Math.min(15_000, Math.max(250, (Number.isFinite(ra) ? ra : 1) * 1000));
+    await new Promise((r) => setTimeout(r, waitMs));
+    return apiFetch<T>(path, opts, 1);
+  }
   if (!res.ok) {
-    let detail = '';
+    let body: Json = {};
     try {
-      const body = (await res.json()) as Json;
-      detail = typeof body.message === 'string' ? body.message : '';
+      body = (await res.json()) as Json;
     } catch {
       /* body not JSON */
     }
-    throw new ApiError(res.status, `ENTRA API ${res.status} for ${path}${detail ? `: ${detail}` : ''}`);
+    const detail = typeof body.message === 'string' ? body.message : '';
+    const code = typeof body.code === 'string' ? body.code : null;
+    throw new ApiError(
+      res.status,
+      `ENTRA API ${res.status} for ${opts.method ?? 'GET'} ${path}${detail ? `: ${detail}` : ''}`,
+      code,
+      hintFor(res.status, detail),
+      body.validation,
+    );
   }
+  if (res.status === 204) return {} as T;
   return (await res.json()) as T;
 }
+
+const apiGet = <T = Json>(path: string, params: Params = {}) => apiFetch<T>(path, { params });
 
 type ExpLevel = 'no_experience' | '1_3_years' | '3_6_years' | '6_plus_years';
 const EXP_ORDER: ExpLevel[] = ['no_experience', '1_3_years', '3_6_years', '6_plus_years'];
@@ -78,11 +144,21 @@ type ApiJob = {
   salaryCurrency?: string | null;
   salaryPeriod?: string | null;
   company?: { id?: string; name?: string; slug?: string; isVerified?: boolean } | null;
-  city?: { nameEn?: string } | null;
+  city?: { id?: string; nameEn?: string } | null;
   country?: { id?: string; nameEn?: string; slug?: string; code?: string } | null;
-  specialization?: { nameEn?: string; slug?: string } | null;
-  skills?: Array<{ nameEn?: string; name?: string }> | null;
+  specialization?: { id?: string; nameEn?: string; slug?: string } | null;
+  skills?: Array<{ id?: string; nameEn?: string; name?: string; skill?: { id?: string; nameEn?: string } | null }> | null;
   publishedAt?: string | null;
+  // employer-side fields (own jobs)
+  companyId?: string | null;
+  countryId?: string | null;
+  cityId?: string | null;
+  specializationId?: string | null;
+  isActive?: boolean | null;
+  expiresAt?: string | null;
+  createdAt?: string | null;
+  benefits?: string[] | null;
+  _count?: { applications?: number } | null;
 };
 type JobList = { data?: ApiJob[]; total?: number; page?: number; limit?: number; totalPages?: number };
 type ApiCompany = {
@@ -99,6 +175,7 @@ type ApiCompany = {
 // ---------- countries (ISO code ↔ ENTRA country id) ----------
 type Country = { id: string; code: string; slug: string; name: string };
 const codeById = new Map<string, string>();
+const countryById = new Map<string, Country>();
 let countriesPromise: Promise<Country[]> | null = null;
 
 function loadCountries(): Promise<Country[]> {
@@ -114,7 +191,10 @@ function loadCountries(): Promise<Country[]> {
           slug: c.slug ?? '',
           name: c.nameEn ?? '',
         }));
-        for (const c of list) if (c.code) codeById.set(c.id, c.code);
+        for (const c of list) {
+          if (c.code) codeById.set(c.id, c.code);
+          countryById.set(c.id, c);
+        }
         return list;
       })
       .catch(() => {
@@ -210,10 +290,8 @@ function fmtSalary(j: ApiJob): string | null {
   return range + (PERIOD_SUFFIX[j.salaryPeriod ?? 'monthly'] ?? '/mo');
 }
 
-function jobUrl(j: ApiJob): string {
-  const cc = (codeById.get(j.country?.id ?? '') ?? j.country?.code ?? 'us').toLowerCase();
-  return `${SITE}/${cc}/vacancies/${j.id}?${UTM}`;
-}
+const ccOf = (j: ApiJob) => (codeById.get(j.country?.id ?? j.countryId ?? '') ?? j.country?.code ?? 'us').toLowerCase();
+const jobUrl = (j: ApiJob) => `${SITE}/${ccOf(j)}/vacancies/${j.id}?${UTM}`;
 
 function compactJob(j: ApiJob) {
   return {
@@ -550,13 +628,25 @@ const FIT_NOTE =
 // ---------- tool results ----------
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 const ok = (o: unknown): ToolResult => ({ content: [{ type: 'text', text: JSON.stringify(o, null, 2) }] });
-const fail = (message: string): ToolResult => ({ content: [{ type: 'text', text: JSON.stringify({ error: message }) }], isError: true });
+const fail = (message: string, extra: Json = {}): ToolResult => ({
+  content: [{ type: 'text', text: JSON.stringify({ error: message, ...extra }, null, 2) }],
+  isError: true,
+});
+/** Structured error for API failures: { error, code, status, hint, validation? }. */
+const failApi = (e: ApiError): ToolResult =>
+  fail(e.message, {
+    code: e.code ?? (e.status === 401 ? 'AUTH_ERROR' : e.status === 403 ? 'FORBIDDEN' : e.status === 429 ? 'RATE_LIMITED' : `HTTP_${e.status}`),
+    status: e.status,
+    ...(e.hint ? { hint: e.hint } : {}),
+    ...(e.validation !== undefined ? { validation: e.validation } : {}),
+  });
 const guarded =
   <A>(fn: (a: A) => Promise<ToolResult>) =>
   async (a: A): Promise<ToolResult> => {
     try {
       return await fn(a);
     } catch (e) {
+      if (e instanceof ApiError) return failApi(e);
       return fail(e instanceof Error ? e.message : String(e));
     }
   };
@@ -961,9 +1051,875 @@ async function runPrepareApplication(job_id: string): Promise<ToolResult> {
   });
 }
 
+// =====================================================================
+// ---------- EMPLOYER MODE (ENTRA_API_KEY) ----------
+// =====================================================================
+type Scope = 'jobs:read' | 'jobs:write' | 'applications:read' | 'candidates:read';
+type MeCompany = { id: string; name?: string; slug?: string };
+type Me = {
+  authMethod?: string;
+  user?: { id?: string; email?: string; firstName?: string; lastName?: string; role?: string } | null;
+  apiKey?: { id?: string; name?: string; keyPrefix?: string; scopes?: string[] } | null;
+  company?: MeCompany | null;
+};
+let mePromise: Promise<Me> | null = null;
+
+/** Lazy + cached: GET /employer/api-keys/me. Never called at startup; a failure is not cached. */
+function whoami(): Promise<Me> {
+  if (!mePromise) {
+    mePromise = apiFetch<{ data?: Me }>('/employer/api-keys/me', { auth: true })
+      .then((r) => {
+        const me = (r.data ?? (r as unknown)) as Me;
+        if (!me.company?.id) {
+          throw new ApiError(403, 'API key is not bound to a company', 'FORBIDDEN', `Re-create the key at ${API_KEYS_URL} while managing a company.`);
+        }
+        return me;
+      })
+      .catch((e: unknown) => {
+        mePromise = null;
+        throw e;
+      });
+  }
+  return mePromise;
+}
+
+function scopeError(me: Me, scope: Scope): string | null {
+  const scopes = me.apiKey?.scopes;
+  if (!Array.isArray(scopes)) return null; // scopes unknown → let the API decide
+  if (scopes.includes(scope)) return null;
+  return `API key ${me.apiKey?.keyPrefix ?? ''} lacks the "${scope}" scope (has: ${scopes.join(', ') || 'none'}). Create a key with ${scope} at ${API_KEYS_URL}.`;
+}
+
+type EmployerCtx = { me: Me; company: MeCompany };
+async function employerContext(scope: Scope): Promise<EmployerCtx | { error: ToolResult }> {
+  const me = await whoami();
+  const err = scopeError(me, scope);
+  if (err) return { error: fail(err, { code: 'MISSING_SCOPE', scope, hint: API_KEYS_URL }) };
+  return { me, company: me.company as MeCompany };
+}
+const isCtxError = (c: EmployerCtx | { error: ToolResult }): c is { error: ToolResult } => 'error' in c;
+
+const needsSubscription = (product: string, e: ApiError) =>
+  ok({
+    needs_subscription: true,
+    pricing_url: PRICING_URL,
+    note: product === 'jobs' ? 'Founding plan from $10' : 'Resume Access',
+    message: e.message.replace(/^ENTRA API \d+ for [A-Z]+ \S+: /, ''),
+  });
+
+// ---------- reference resolvers (public endpoints, no key) ----------
+type Ref = { id: string; nameEn?: string; slug?: string; isActive?: boolean; countryId?: string };
+type Match = 'exact' | 'prefix' | 'contains' | 'first';
+const norm = (s: string) => s.trim().toLowerCase();
+
+function pickByName<T extends Ref>(list: T[], q: string): { item: T; match: Match } | null {
+  const n = norm(q);
+  const name = (x: T) => norm(x.nameEn ?? '');
+  const exact = list.find((x) => name(x) === n || (x.slug && x.slug === slugify(q)));
+  if (exact) return { item: exact, match: 'exact' };
+  const prefix = list.find((x) => name(x).startsWith(n));
+  if (prefix) return { item: prefix, match: 'prefix' };
+  const contains = list.find((x) => name(x).includes(n) || (name(x).length > 3 && n.includes(name(x))));
+  if (contains) return { item: contains, match: 'contains' };
+  return list[0] ? { item: list[0], match: 'first' } : null;
+}
+
+async function refSearch(path: string, params: Params): Promise<Ref[]> {
+  const r = await apiGet<{ data?: Ref[] }>(path, { limit: 25, ...params });
+  return r.data ?? [];
+}
+
+async function resolveCity(countryId: string, input: string): Promise<{ city: Ref | null; match: Match | null; suggestions: string[] }> {
+  const q = input.trim();
+  let picked = pickByName(await refSearch('/references/cities', { countryId, search: q }), q);
+  if (!picked) {
+    const first = q.split(/[\s,-]+/).filter((w) => w.length > 2)[0];
+    if (first && norm(first) !== norm(q)) picked = pickByName(await refSearch('/references/cities', { countryId, search: first }), q);
+  }
+  if (picked) return { city: picked.item, match: picked.match, suggestions: [] };
+  const sample = await refSearch('/references/cities', { countryId, limit: 15 });
+  return { city: null, match: null, suggestions: sample.map((c) => c.nameEn ?? '').filter(Boolean) };
+}
+
+async function resolveSpecialization(text: string): Promise<{ specialization: Ref; match: Match; query: string } | null> {
+  const tries = [text.trim()];
+  const role = extractTerms(text, ROLE_DICT)[0]?.term;
+  if (role && !tries.includes(role)) tries.push(role);
+  for (const w of roleTokens(text)) if (w.length > 3 && !tries.includes(w)) tries.push(w);
+  for (const q of tries.slice(0, 5)) {
+    const list = (await refSearch('/references/specializations', { search: q })).filter((s) => s.isActive !== false);
+    const p = pickByName(list, text);
+    if (p) return { specialization: p.item, match: p.match, query: q };
+  }
+  return null;
+}
+
+type ResolvedSkill = { input: string; id: string; name: string };
+async function resolveSkillIds(names: string[]): Promise<{ resolved: ResolvedSkill[]; unresolved: string[] }> {
+  const out = await Promise.all(
+    names.slice(0, 15).map(async (input): Promise<ResolvedSkill | string> => {
+      const list = await refSearch('/references/skills', { search: input, limit: 10 });
+      const p = pickByName(list, input);
+      if (p && (p.match !== 'first' || list.length === 1)) return { input, id: p.item.id, name: p.item.nameEn ?? input };
+      return input;
+    }),
+  );
+  return {
+    resolved: out.filter((x): x is ResolvedSkill => typeof x !== 'string'),
+    unresolved: out.filter((x): x is string => typeof x === 'string'),
+  };
+}
+
+// ---------- own jobs ----------
+const manageUrl = (id: string) => `${SITE}/employer/jobs/${id}`;
+const publicJobUrl = (j: ApiJob) => `${SITE}/${ccOf(j)}/vacancies/${j.id}`;
+const jobSkillNames = (j: ApiJob) => (j.skills ?? []).map((s) => s.nameEn ?? s.name ?? s.skill?.nameEn ?? '').filter(Boolean);
+
+function compactOwnJob(j: ApiJob) {
+  const expired = !!j.expiresAt && Date.parse(j.expiresAt) < Date.now();
+  return {
+    id: j.id,
+    title: j.title,
+    status: j.isActive === false ? 'closed' : expired ? 'expired' : 'active',
+    location: [j.city?.nameEn, j.country?.nameEn ?? countryById.get(j.countryId ?? '')?.name].filter(Boolean).join(', ') || null,
+    work_location: j.workLocation === 'office' ? 'onsite' : (j.workLocation ?? null),
+    employment_type: j.employmentType ?? null,
+    experience: j.experienceLevel ?? null,
+    salary: fmtSalary(j),
+    specialization: j.specialization?.nameEn ?? null,
+    applications: j._count?.applications ?? null,
+    published_at: j.publishedAt ?? null,
+    expires_at: j.expiresAt ?? null,
+    url: publicJobUrl(j),
+    manage_url: manageUrl(j.id),
+  };
+}
+
+/** Public GET /jobs/:id first (no key); closed jobs may be hidden there, so fall back to scanning /my-jobs. */
+async function getOwnJob(id: string): Promise<ApiJob> {
+  await loadCountries();
+  try {
+    const r = await apiGet<{ data?: ApiJob }>(`/jobs/${encodeURIComponent(id)}`);
+    const j = (r.data ?? (r as unknown)) as ApiJob;
+    if (j?.id) return j;
+  } catch (e) {
+    if (!(e instanceof ApiError) || (e.status !== 404 && e.status !== 400)) throw e;
+  }
+  for (let page = 1; page <= 5; page++) {
+    const r = await apiFetch<JobList>('/my-jobs', { auth: true, params: { page, limit: 100 } });
+    const data = r.data ?? [];
+    const hit = data.find((j) => j.id === id);
+    if (hit) return hit;
+    if (data.length < 100) break;
+  }
+  throw new ApiError(404, `Job ${id} not found (neither public nor among this company's jobs)`, 'NOT_FOUND', "Use my_jobs to list this company's job ids.");
+}
+
+function foreignJobError(j: ApiJob, company: MeCompany): ToolResult | null {
+  const owner = j.companyId ?? j.company?.id ?? null;
+  if (owner && owner !== company.id) {
+    return fail(`Job ${j.id} belongs to "${j.company?.name ?? owner}", not to ${company.name ?? company.id}.`, { code: 'FORBIDDEN' });
+  }
+  return null;
+}
+
+const expiresAtFromDays = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString();
+const toApiWorkLocation = (w: 'remote' | 'onsite' | 'hybrid') => (w === 'onsite' ? 'office' : w);
+
+// ---------- candidates (resumes) ----------
+type ApiResume = {
+  id: string;
+  title?: string | null;
+  bio?: string | null;
+  experienceLevel?: string | null;
+  desiredSalaryMin?: number | null;
+  desiredSalaryMax?: number | null;
+  salaryCurrency?: string | null;
+  salaryPeriod?: string | null;
+  countryId?: string | null;
+  cityId?: string | null;
+  country?: { id?: string; nameEn?: string; code?: string } | null;
+  city?: { id?: string; nameEn?: string } | null;
+  employmentType?: string | null;
+  workLocation?: string | null;
+  isReadyToRelocate?: string | null;
+  phone?: string | null;
+  whatsapp?: string | null;
+  linkedinUrl?: string | null;
+  portfolioUrl?: string | null;
+  publishedAt?: string | null;
+  completionPercentage?: number | null;
+  hasFullAccess?: boolean | null;
+  skills?: Array<{ id?: string; nameEn?: string; name?: string; skill?: { id?: string; nameEn?: string } | null }> | null;
+  specialization?: { id?: string; nameEn?: string; slug?: string } | null;
+  user?: { id?: string; email?: string | null; profile?: { firstName?: string; lastName?: string; avatarUrl?: string | null } | null } | null;
+  experience?: Array<{ title?: string; company?: string; startDate?: string; endDate?: string; isCurrent?: boolean; description?: string }> | null;
+  resumeLanguages?: Array<{ language?: { name?: string; code?: string } | null; level?: string }> | null;
+  educations?: Array<{ degree?: string; institution?: string; field?: string }> | null;
+};
+type ResumeList = { data?: ApiResume[]; total?: number; page?: number; limit?: number };
+
+const resumeSkillNames = (r: ApiResume) => (r.skills ?? []).map((s) => s.nameEn ?? s.name ?? s.skill?.nameEn ?? '').filter(Boolean);
+const currentRole = (r: ApiResume) => (r.experience ?? []).find((e) => e.isCurrent) ?? r.experience?.[0] ?? null;
+const resumeCountry = (r: ApiResume): Country | null =>
+  countryById.get(r.country?.id ?? r.countryId ?? '') ??
+  (r.country?.nameEn ? { id: r.country.id ?? '', code: r.country.code ?? '', slug: '', name: r.country.nameEn } : null);
+const CONTACT_NOTE = 'Contact details appear only when ENTRA returns them (hasFullAccess: the candidate applied to one of your jobs or accepted your invitation). Nothing is inferred.';
+
+function compactCandidate(r: ApiResume) {
+  const country = resumeCountry(r);
+  const full = r.hasFullAccess === true;
+  const contact: Record<string, string> = {};
+  if (full) {
+    const pairs: Array<[string, string | null | undefined]> = [
+      ['email', r.user?.email],
+      ['phone', r.phone],
+      ['whatsapp', r.whatsapp],
+      ['linkedin', r.linkedinUrl],
+      ['portfolio', r.portfolioUrl],
+    ];
+    for (const [k, v] of pairs) if (v) contact[k] = v;
+  }
+  const name = [r.user?.profile?.firstName, r.user?.profile?.lastName].filter(Boolean).join(' ') || null;
+  const cur = currentRole(r);
+  const expected = fmtSalary({ id: r.id, title: '', salaryMin: r.desiredSalaryMin, salaryMax: r.desiredSalaryMax, salaryCurrency: r.salaryCurrency, salaryPeriod: r.salaryPeriod });
+  return {
+    id: r.id,
+    name,
+    title: r.title ?? null,
+    experience_level: r.experienceLevel ?? null,
+    specialization: r.specialization?.nameEn ?? null,
+    location: [r.city?.nameEn, country?.name].filter(Boolean).join(', ') || null,
+    country_code: country?.code || null,
+    ready_to_relocate: r.isReadyToRelocate ?? null,
+    work_location: r.workLocation === 'office' ? 'onsite' : (r.workLocation ?? null),
+    employment_type: r.employmentType ?? null,
+    expected_salary: expected,
+    skills: resumeSkillNames(r).slice(0, 15),
+    languages: (r.resumeLanguages ?? []).map((l) => [l.language?.name, l.level].filter(Boolean).join(' · ')).filter(Boolean),
+    current_role: cur ? [cur.title, cur.company].filter(Boolean).join(' @ ') || null : null,
+    education: (r.educations ?? []).slice(0, 2).map((e) => [e.degree, e.field, e.institution].filter(Boolean).join(', ')).filter(Boolean),
+    bio: (r.bio ?? '').slice(0, 300) || null,
+    published_at: r.publishedAt ?? null,
+    profile_completion: r.completionPercentage ?? null,
+    contact_access: full,
+    contact: full && Object.keys(contact).length ? contact : null,
+    url: `${SITE}/${(country?.code || 'us').toLowerCase()}/candidates/${r.id}`,
+  };
+}
+
+// ---------- candidate scoring (explainable, 0–100) ----------
+type JobProfile = {
+  skills: string[];
+  role: string | null;
+  seniority: ExpLevel | null;
+  remote: boolean;
+  country: Country | null;
+  salary: string | null;
+};
+type ScoredCandidate = { resume: ApiResume; score: number; why: string[]; matched: string[]; gaps: string[] };
+
+function scoreCandidate(r: ApiResume, p: JobProfile): ScoredCandidate {
+  const why: string[] = [];
+  let earned = 0;
+  let possible = 0;
+  const title = r.title ?? '';
+  const cur = currentRole(r);
+  const text = [
+    title,
+    r.bio ?? '',
+    resumeSkillNames(r).join(' '),
+    r.specialization?.nameEn ?? '',
+    ...(r.experience ?? []).map((e) => `${e.title ?? ''} ${e.description ?? ''}`),
+    ...(r.educations ?? []).map((e) => `${e.degree ?? ''} ${e.field ?? ''}`),
+  ]
+    .join('\n')
+    .toLowerCase();
+
+  const matched: string[] = [];
+  const inTitle: string[] = [];
+  const gaps: string[] = [];
+  const skills = p.skills.slice(0, 12);
+  if (skills.length) {
+    possible += 50;
+    for (const s of skills) {
+      const re = termRegex(s);
+      if (re.test(text)) {
+        matched.push(s);
+        if (re.test(title.toLowerCase())) inTitle.push(s);
+      } else gaps.push(s);
+    }
+    earned += Math.min(50, Math.round((50 * matched.length) / skills.length) + (inTitle.length ? 5 : 0));
+    why.push(matched.length ? `Skills: ${matched.length}/${skills.length} of the job's skills found (${matched.join(', ')})` : `Skills: none of the job's ${skills.length} skills found in the profile`);
+    if (inTitle.length) why.push(`In the candidate's headline: ${inTitle.join(', ')}`);
+  }
+
+  if (p.role) {
+    possible += 25;
+    const rt = roleTokens(p.role);
+    const ct = new Set(roleTokens([title, r.specialization?.nameEn ?? '', cur?.title ?? ''].join(' ')));
+    const hit = rt.filter((t) => ct.has(t));
+    const frac = rt.length ? hit.length / rt.length : 0;
+    let pts = Math.round(25 * frac);
+    if (!pts && termRegex(p.role).test(text)) pts = 5;
+    earned += pts;
+    why.push(
+      frac >= 0.99
+        ? `Title match: "${title}" fits "${p.role}"`
+        : frac > 0
+          ? `Partial title match (${Math.round(frac * 100)}%): "${title}" vs "${p.role}"`
+          : pts
+            ? `Role "${p.role}" appears in the profile text, not the headline`
+            : `Headline "${title}" does not match "${p.role}"`,
+    );
+  }
+
+  if (p.seniority) {
+    possible += 10;
+    if (isExpLevel(r.experienceLevel)) {
+      const d = Math.abs(EXP_ORDER.indexOf(r.experienceLevel) - EXP_ORDER.indexOf(p.seniority));
+      earned += d === 0 ? 10 : d === 1 ? 5 : 0;
+      why.push(`Seniority: job asks ${EXP_LABEL[p.seniority]}, candidate has ${EXP_LABEL[r.experienceLevel]} — ${d === 0 ? 'match' : d === 1 ? 'close' : 'mismatch'}`);
+    } else {
+      earned += 5;
+      why.push('Seniority: not stated on the profile');
+    }
+  }
+
+  possible += 10;
+  const cc = resumeCountry(r);
+  if (p.remote) {
+    const pref = r.workLocation ?? null;
+    earned += pref === 'office' ? 5 : 10;
+    why.push(pref === 'office' ? 'Remote role, but the candidate prefers office work' : `Remote role — candidate location ${cc?.name ?? 'unknown'} is not a blocker`);
+  } else if (p.country) {
+    if (cc?.id === p.country.id) {
+      earned += 10;
+      why.push(`Located in ${p.country.name} (job country)`);
+    } else if (r.isReadyToRelocate === 'ready' || r.isReadyToRelocate === 'considering') {
+      earned += r.isReadyToRelocate === 'ready' ? 7 : 5;
+      why.push(`Located in ${cc?.name ?? 'unknown country'}, ${r.isReadyToRelocate === 'ready' ? 'ready' : 'considering'} to relocate to ${p.country.name}`);
+    } else {
+      why.push(`Located in ${cc?.name ?? 'unknown country'}, job is ${p.country.name} — relocation not indicated`);
+    }
+  } else {
+    earned += 5;
+    why.push('Location: job country unknown');
+  }
+
+  const expected = fmtSalary({ id: r.id, title: '', salaryMin: r.desiredSalaryMin, salaryMax: r.desiredSalaryMax, salaryCurrency: r.salaryCurrency, salaryPeriod: r.salaryPeriod });
+  if (expected) why.push(`Expected salary: ${expected}${p.salary ? ` (job band ${p.salary})` : ''} — informational, not scored`);
+
+  const score = possible ? Math.round((100 * earned) / possible) : 0;
+  return { resume: r, score, why, matched, gaps: gaps.slice(0, 5) };
+}
+const CANDIDATE_FIT_NOTE =
+  'fit_score is deterministic keyword matching (skills overlap, headline vs role, seniority, location/remote) — not a prediction. Review profiles before contacting; contact details are shown only when ENTRA grants access.';
+
+// ---------- employer tool schemas ----------
+const employmentEnum = z.enum(['full_time', 'part_time', 'contract', 'freelance', 'internship']);
+const workLocationEnum = z.enum(['remote', 'onsite', 'hybrid']);
+const salaryPeriodEnum = z.enum(['hourly', 'daily', 'weekly', 'monthly', 'yearly']);
+const applicationStatusEnum = z.enum(['pending', 'invitation', 'interview', 'offer', 'rejected', 'withdrawn']);
+
+const postJobShape = {
+  title: z.string().min(3).max(200).describe('Job title (3–200 chars)'),
+  description: z.string().min(10).max(10000).describe('Job description, plain text or markdown (10–10000 chars)'),
+  requirements: z.string().max(5000).optional().describe('Requirements (≤5000 chars)'),
+  employment_type: employmentEnum.describe('full_time | part_time | contract | freelance | internship'),
+  work_location: workLocationEnum.describe('remote | onsite | hybrid'),
+  country: z.string().describe('ISO-2 code (US, GB, AE…) or country name'),
+  city: z.string().describe('City name — required by ENTRA even for remote roles (use the company HQ city). Resolved via /references/cities.'),
+  specialization: z.string().optional().describe('Specialization, free text (e.g. "Sales Manager"). Defaults to the title; best active match is used and reported.'),
+  experience_level: experienceEnum.optional().describe('Defaults to the level detected from the title/text, else 1_3_years'),
+  salary_min: z.number().int().min(0).optional(),
+  salary_max: z.number().int().min(0).optional(),
+  salary_currency: z.string().length(3).optional().describe('ISO-4217, default USD'),
+  salary_period: salaryPeriodEnum.optional().describe('hourly | daily | weekly | monthly | yearly — ENTRA default is monthly; pass "yearly" for annual figures'),
+  benefits: z.array(z.string().max(100)).max(20).optional(),
+  skills: z.array(z.string()).max(15).optional().describe('Skill names; resolved to ENTRA skills where an unambiguous match exists'),
+  internal_job_id: z.string().max(100).regex(/^[a-zA-Z0-9_/-]*$/).optional().describe('Your ATS reference, e.g. "ENG-123"'),
+  expires_in_days: z.number().int().min(1).max(365).optional().describe('Listing lifetime (default 30)'),
+};
+type PostJobArgs = z.infer<z.ZodObject<typeof postJobShape>>;
+
+const updateJobShape = {
+  job_id: z.string().describe('Job id (from my_jobs / post_job)'),
+  title: z.string().min(3).max(200).optional(),
+  description: z.string().min(10).max(10000).optional(),
+  requirements: z.string().max(5000).optional(),
+  employment_type: employmentEnum.optional(),
+  work_location: workLocationEnum.optional(),
+  experience_level: experienceEnum.optional(),
+  country: z.string().optional().describe('Change location — pass country AND city together'),
+  city: z.string().optional(),
+  specialization: z.string().optional().describe('Free text, resolved to the best active specialization'),
+  salary_min: z.number().int().min(0).optional(),
+  salary_max: z.number().int().min(0).optional(),
+  salary_currency: z.string().length(3).optional(),
+  salary_period: salaryPeriodEnum.optional(),
+  benefits: z.array(z.string().max(100)).max(20).optional(),
+  internal_job_id: z.string().max(100).regex(/^[a-zA-Z0-9_/-]*$/).optional(),
+  expires_in_days: z.number().int().min(1).max(365).optional().describe('Extend: new expiry = now + N days'),
+  is_active: z.boolean().optional().describe('true re-opens a closed job; false closes it (same as close_job)'),
+};
+type UpdateJobArgs = z.infer<z.ZodObject<typeof updateJobShape>>;
+
+const searchCandidatesShape = {
+  query: z.string().optional().describe('Free text matched against resume title/bio, e.g. "sales manager"'),
+  skills: z.array(z.string()).max(10).optional().describe('Skill names (ANY match); resolved to ENTRA skill ids'),
+  specialization: z.string().optional().describe('Specialization, free text'),
+  country: z.string().optional().describe('ISO-2 code or country name'),
+  city: z.string().optional().describe('City name (needs country)'),
+  experience: experienceEnum.optional(),
+  work_location: workLocationEnum.optional().describe('Candidate preference: remote | onsite | hybrid'),
+  remote_only: z.boolean().optional().describe('Shorthand for work_location="remote"'),
+  employment_type: employmentEnum.optional(),
+  ready_to_relocate: z.enum(['ready', 'not_ready', 'considering']).optional(),
+  salary_min: z.number().int().min(0).optional().describe('Expected-salary filter passed through to ENTRA (salaryMin)'),
+  salary_max: z.number().int().min(0).optional().describe('Expected-salary filter passed through to ENTRA (salaryMax)'),
+  salary_currency: z.string().length(3).optional(),
+  has_linkedin: z.boolean().optional(),
+  has_portfolio: z.boolean().optional(),
+  published_within_days: z.number().int().min(1).max(365).optional(),
+  limit: z.number().int().min(1).max(25).optional().describe('Max candidates (default 10, max 25)'),
+  page: z.number().int().min(1).optional(),
+};
+type SearchCandidatesArgs = z.infer<z.ZodObject<typeof searchCandidatesShape>>;
+
+const matchCandidatesShape = {
+  job_id: z.string().optional().describe('One of your job ids (from my_jobs / post_job)'),
+  job_text: z.string().max(12000).optional().describe('Alternative to job_id: job title on the first line, then the description'),
+  country: z.string().optional().describe('Country filter for job_text input (ISO-2 or name); ignored when job_id is given'),
+  include_other_countries: z.boolean().optional().describe('For onsite/hybrid jobs, also consider candidates outside the job country (default false)'),
+  limit: z.number().int().min(1).max(20).optional().describe('Top N (default 10, max 20)'),
+};
+type MatchCandidatesArgs = z.infer<z.ZodObject<typeof matchCandidatesShape>>;
+
+// ---------- employer tool implementations ----------
+async function runWhoami(): Promise<ToolResult> {
+  const me = await whoami();
+  const scopes = me.apiKey?.scopes ?? [];
+  const tools: Record<string, Scope> = {
+    my_jobs: 'jobs:read',
+    post_job: 'jobs:write',
+    update_job: 'jobs:write',
+    close_job: 'jobs:write',
+    job_applications: 'applications:read',
+    search_candidates: 'candidates:read',
+    match_candidates: 'candidates:read',
+  };
+  return ok({
+    mode: 'employer',
+    auth_method: me.authMethod ?? 'api_key',
+    company: me.company ? { id: me.company.id, name: me.company.name ?? null, slug: me.company.slug ?? null, url: companyUrl(me.company.slug) } : null,
+    user: me.user ? { name: [me.user.firstName, me.user.lastName].filter(Boolean).join(' ') || null, email: me.user.email ?? null, role: me.user.role ?? null } : null,
+    api_key: me.apiKey ? { name: me.apiKey.name ?? null, prefix: me.apiKey.keyPrefix ?? null, scopes } : null,
+    tools_available: Object.entries(tools).filter(([, s]) => scopes.includes(s)).map(([t]) => t).concat('employer_whoami'),
+    tools_missing_scope: Object.entries(tools).filter(([, s]) => !scopes.includes(s)).map(([t, s]) => `${t} (needs ${s})`),
+    manage_keys_url: API_KEYS_URL,
+  });
+}
+
+async function runPostJob(a: PostJobArgs): Promise<ToolResult> {
+  const ctx = await employerContext('jobs:write');
+  if (isCtxError(ctx)) return ctx.error;
+  const notes: string[] = [];
+
+  const country = await resolveCountry(a.country);
+  if (!country) return fail(await unknownCountryMessage(a.country));
+  const cityRes = await resolveCity(country.id, a.city);
+  if (!cityRes.city) {
+    return fail(`City "${a.city}" not found in ${country.name}. ENTRA requires a city id.`, {
+      code: 'CITY_NOT_FOUND',
+      suggestions: cityRes.suggestions,
+      hint: 'Retry with one of the suggested city names.',
+    });
+  }
+  if (cityRes.match !== 'exact') notes.push(`city "${a.city}" resolved to "${cityRes.city.nameEn}" (${cityRes.match} match)`);
+
+  const specText = a.specialization?.trim() || a.title;
+  const spec = await resolveSpecialization(specText);
+  if (!spec) {
+    return fail(`No active ENTRA specialization matches "${specText}".`, {
+      code: 'SPECIALIZATION_NOT_FOUND',
+      hint: 'Pass specialization as a broader term, e.g. "Sales Manager", "Software Engineer", "Data Scientist".',
+    });
+  }
+  if (spec.match !== 'exact' || !a.specialization) notes.push(`specialization "${specText}" resolved to "${spec.specialization.nameEn}" (${spec.match} match via "${spec.query}")`);
+
+  const detected = a.experience_level ? null : detectSeniority(`${a.title}\n${a.requirements ?? ''}\n${a.description}`);
+  const experienceLevel: ExpLevel = a.experience_level ?? detected?.level ?? '1_3_years';
+  if (!a.experience_level) notes.push(detected ? `experience_level detected as ${experienceLevel} (${detected.basis})` : 'experience_level not given and not detectable — defaulted to 1_3_years');
+
+  if (a.salary_min !== undefined && a.salary_max !== undefined && a.salary_min > a.salary_max) return fail('salary_min must be ≤ salary_max');
+  const hasSal = a.salary_min !== undefined || a.salary_max !== undefined;
+  const salaryPeriod = hasSal ? (a.salary_period ?? 'monthly') : undefined;
+  if (hasSal && !a.salary_period) notes.push('salary_period not given — defaulted to monthly (ENTRA default); pass salary_period:"yearly" for annual figures');
+
+  const skillRes = a.skills?.length ? await resolveSkillIds(a.skills) : { resolved: [], unresolved: [] };
+  if (skillRes.unresolved.length) notes.push(`skills not found on ENTRA (omitted): ${skillRes.unresolved.join(', ')}`);
+
+  const days = a.expires_in_days ?? 30;
+  const body: Json = {
+    title: a.title,
+    description: a.description,
+    companyId: ctx.company.id,
+    employmentType: a.employment_type,
+    workLocation: toApiWorkLocation(a.work_location),
+    experienceLevel,
+    countryId: country.id,
+    cityId: cityRes.city.id,
+    specializationId: spec.specialization.id,
+    expiresAt: expiresAtFromDays(days),
+    ...(a.requirements ? { requirements: a.requirements } : {}),
+    ...(a.salary_min !== undefined ? { salaryMin: a.salary_min } : {}),
+    ...(a.salary_max !== undefined ? { salaryMax: a.salary_max } : {}),
+    ...(hasSal ? { salaryCurrency: (a.salary_currency ?? 'USD').toUpperCase(), salaryPeriod } : {}),
+    ...(a.benefits?.length ? { benefits: a.benefits } : {}),
+    ...(a.internal_job_id ? { internalJobId: a.internal_job_id } : {}),
+    ...(skillRes.resolved.length ? { skills: skillRes.resolved.map((s) => ({ skillId: s.id, isRequired: true })) } : {}),
+  };
+
+  let job: ApiJob;
+  try {
+    const r = await apiFetch<{ data?: ApiJob }>('/jobs', { method: 'POST', body, auth: true });
+    job = (r.data ?? (r as unknown)) as ApiJob;
+  } catch (e) {
+    if (isSubscription403(e)) return needsSubscription('jobs', e as ApiError);
+    throw e;
+  }
+  if (!job.country && !job.countryId) job.countryId = country.id; // for the URL if the API omits the relation
+  return ok({
+    posted: true,
+    job: compactOwnJob(job),
+    resolved: {
+      country: `${country.name} (${country.code})`,
+      city: cityRes.city.nameEn ?? null,
+      specialization: spec.specialization.nameEn ?? null,
+      experience_level: experienceLevel,
+      salary_period: salaryPeriod ?? null,
+      skills: skillRes.resolved.map((s) => s.name),
+      expires_at: body.expiresAt,
+    },
+    ...(notes.length ? { notes } : {}),
+    next: 'Share job.url with candidates; use my_jobs / job_applications to track applicants.',
+  });
+}
+
+async function runMyJobs(a: { status?: 'active' | 'closed' | 'all'; search?: string; limit?: number; page?: number }): Promise<ToolResult> {
+  const ctx = await employerContext('jobs:read');
+  if (isCtxError(ctx)) return ctx.error;
+  await loadCountries();
+  const status = a.status ?? 'active';
+  const r = await apiFetch<JobList>('/my-jobs', {
+    auth: true,
+    params: {
+      isActive: status === 'all' ? undefined : status === 'active',
+      search: a.search,
+      limit: a.limit ?? 20,
+      page: a.page ?? 1,
+      sortBy: 'publishedAt',
+      sortOrder: 'desc',
+    },
+  });
+  const jobs = (r.data ?? []).map(compactOwnJob);
+  return ok({
+    company: ctx.company.name ?? ctx.company.id,
+    status,
+    total: r.total ?? jobs.length,
+    page: r.page ?? a.page ?? 1,
+    returned: jobs.length,
+    jobs,
+  });
+}
+
+async function runCloseJob(a: { job_id: string; confirm?: boolean }): Promise<ToolResult> {
+  const ctx = await employerContext('jobs:write');
+  if (isCtxError(ctx)) return ctx.error;
+  const job = await getOwnJob(a.job_id);
+  const foreign = foreignJobError(job, ctx.company);
+  if (foreign) return foreign;
+  if (!a.confirm) {
+    return ok({
+      preview: true,
+      action: 'close (unpublish) this job — reversible with update_job {is_active: true}',
+      job: compactOwnJob(job),
+      applications: job._count?.applications ?? null,
+      confirm_with: { job_id: a.job_id, confirm: true },
+    });
+  }
+  const r = await apiFetch<{ data?: ApiJob }>(`/jobs/${encodeURIComponent(a.job_id)}`, { method: 'PATCH', body: { isActive: false }, auth: true });
+  const updated = (r.data ?? (r as unknown)) as ApiJob;
+  return ok({ closed: true, job: compactOwnJob({ ...job, ...updated, isActive: false }) });
+}
+
+async function runUpdateJob(a: UpdateJobArgs): Promise<ToolResult> {
+  const ctx = await employerContext('jobs:write');
+  if (isCtxError(ctx)) return ctx.error;
+  const notes: string[] = [];
+  const body: Json = {};
+  if (a.title !== undefined) body.title = a.title;
+  if (a.description !== undefined) body.description = a.description;
+  if (a.requirements !== undefined) body.requirements = a.requirements;
+  if (a.employment_type) body.employmentType = a.employment_type;
+  if (a.work_location) body.workLocation = toApiWorkLocation(a.work_location);
+  if (a.experience_level) body.experienceLevel = a.experience_level;
+  if (a.salary_min !== undefined) body.salaryMin = a.salary_min;
+  if (a.salary_max !== undefined) body.salaryMax = a.salary_max;
+  if (a.salary_min !== undefined && a.salary_max !== undefined && a.salary_min > a.salary_max) return fail('salary_min must be ≤ salary_max');
+  if (a.salary_currency) body.salaryCurrency = a.salary_currency.toUpperCase();
+  if (a.salary_period) body.salaryPeriod = a.salary_period;
+  if (a.benefits) body.benefits = a.benefits;
+  if (a.internal_job_id !== undefined) body.internalJobId = a.internal_job_id;
+  if (a.expires_in_days) body.expiresAt = expiresAtFromDays(a.expires_in_days);
+  if (a.is_active !== undefined) body.isActive = a.is_active;
+  if (a.country || a.city) {
+    if (!a.country || !a.city) return fail('To change the location pass both country and city.');
+    const country = await resolveCountry(a.country);
+    if (!country) return fail(await unknownCountryMessage(a.country));
+    const cityRes = await resolveCity(country.id, a.city);
+    if (!cityRes.city) return fail(`City "${a.city}" not found in ${country.name}.`, { code: 'CITY_NOT_FOUND', suggestions: cityRes.suggestions });
+    if (cityRes.match !== 'exact') notes.push(`city "${a.city}" resolved to "${cityRes.city.nameEn}" (${cityRes.match} match)`);
+    body.countryId = country.id;
+    body.cityId = cityRes.city.id;
+  }
+  if (a.specialization) {
+    const spec = await resolveSpecialization(a.specialization);
+    if (!spec) return fail(`No active ENTRA specialization matches "${a.specialization}".`, { code: 'SPECIALIZATION_NOT_FOUND' });
+    if (spec.match !== 'exact') notes.push(`specialization resolved to "${spec.specialization.nameEn}" (${spec.match} match)`);
+    body.specializationId = spec.specialization.id;
+  }
+  if (!Object.keys(body).length) return fail('Nothing to update — pass at least one field besides job_id.');
+
+  const job = await getOwnJob(a.job_id);
+  const foreign = foreignJobError(job, ctx.company);
+  if (foreign) return foreign;
+  const r = await apiFetch<{ data?: ApiJob }>(`/jobs/${encodeURIComponent(a.job_id)}`, { method: 'PATCH', body, auth: true });
+  const updated = (r.data ?? (r as unknown)) as ApiJob;
+  return ok({
+    updated: true,
+    fields: Object.keys(body),
+    job: compactOwnJob({ ...job, ...updated }),
+    ...(notes.length ? { notes } : {}),
+  });
+}
+
+type ApiApplication = {
+  id: string;
+  jobId?: string;
+  status?: string;
+  coverLetter?: string | null;
+  appliedAt?: string;
+  isUnread?: boolean;
+  user?: { id?: string; firstName?: string; lastName?: string; email?: string; phone?: string; avatarUrl?: string } | null;
+  job?: { id?: string; title?: string; company?: { name?: string } | null; country?: { id?: string; nameEn?: string } | null } | null;
+  resume?: { id?: string; title?: string; phone?: string | null; whatsapp?: string | null; linkedinUrl?: string | null; portfolioUrl?: string | null; bio?: string | null } | null;
+};
+type ApplicationList = { success?: boolean; data?: ApiApplication[]; total?: number; page?: number; limit?: number };
+
+function compactApplication(app: ApiApplication) {
+  const contact: Record<string, string> = {};
+  const pairs: Array<[string, string | null | undefined]> = [
+    ['email', app.user?.email],
+    ['phone', app.user?.phone ?? app.resume?.phone],
+    ['whatsapp', app.resume?.whatsapp],
+    ['linkedin', app.resume?.linkedinUrl],
+    ['portfolio', app.resume?.portfolioUrl],
+  ];
+  for (const [k, v] of pairs) if (v) contact[k] = v;
+  const cc = (codeById.get(app.job?.country?.id ?? '') ?? 'us').toLowerCase();
+  return {
+    id: app.id,
+    status: app.status ?? null,
+    applied_at: app.appliedAt ?? null,
+    unread: app.isUnread ?? null,
+    job: app.job ? { id: app.job.id ?? app.jobId ?? null, title: app.job.title ?? null } : { id: app.jobId ?? null, title: null },
+    candidate: [app.user?.firstName, app.user?.lastName].filter(Boolean).join(' ') || null,
+    resume: app.resume ? { id: app.resume.id ?? null, title: app.resume.title ?? null, bio: (app.resume.bio ?? '').slice(0, 300) || null, url: app.resume.id ? `${SITE}/${cc}/candidates/${app.resume.id}` : null } : null,
+    contact: Object.keys(contact).length ? contact : null,
+    cover_letter: (app.coverLetter ?? '').slice(0, 600) || null,
+  };
+}
+
+async function runJobApplications(a: { job_id?: string; status?: z.infer<typeof applicationStatusEnum>; limit?: number; page?: number }): Promise<ToolResult> {
+  const ctx = await employerContext('applications:read');
+  if (isCtxError(ctx)) return ctx.error;
+  await loadCountries();
+  const path = a.job_id ? `/jobs/${encodeURIComponent(a.job_id)}/applications` : '/employer/applications';
+  const r = await apiFetch<ApplicationList>(path, { auth: true, params: { page: a.page ?? 1, limit: a.limit ?? 20 } });
+  let apps = r.data ?? [];
+  if (a.status) apps = apps.filter((x) => x.status === a.status);
+  const counts: Record<string, number> = {};
+  for (const x of r.data ?? []) counts[x.status ?? 'unknown'] = (counts[x.status ?? 'unknown'] ?? 0) + 1;
+  return ok({
+    scope: a.job_id ? { job_id: a.job_id } : { company: ctx.company.name ?? ctx.company.id },
+    total: r.total ?? apps.length,
+    page: r.page ?? a.page ?? 1,
+    returned: apps.length,
+    status_counts_on_page: counts,
+    ...(a.status ? { status_filter: `${a.status} (applied client-side to this page)` } : {}),
+    applications: apps.map(compactApplication),
+    note: `${CONTACT_NOTE} Status changes are not available via API keys — use ${SITE}/employer/applications.`,
+  });
+}
+
+async function runSearchCandidates(a: SearchCandidatesArgs): Promise<ToolResult> {
+  const ctx = await employerContext('candidates:read');
+  if (isCtxError(ctx)) return ctx.error;
+  await loadCountries();
+  const notes: string[] = [];
+  const params: Params = {
+    search: a.query?.trim() || undefined,
+    experienceLevel: a.experience,
+    employmentType: a.employment_type,
+    isReadyToRelocate: a.ready_to_relocate,
+    salaryMin: a.salary_min,
+    salaryMax: a.salary_max,
+    salaryCurrency: a.salary_currency?.toUpperCase(),
+    hasLinkedIn: a.has_linkedin,
+    hasPortfolio: a.has_portfolio,
+    limit: a.limit ?? 10,
+    page: a.page ?? 1,
+  };
+  const wl = a.work_location ?? (a.remote_only ? 'remote' : undefined);
+  if (wl) params.workLocation = toApiWorkLocation(wl);
+  if (a.published_within_days) params.publishedDateFrom = new Date(Date.now() - a.published_within_days * 86_400_000).toISOString().slice(0, 10);
+
+  const resolved: Json = {};
+  if (a.country) {
+    const country = await resolveCountry(a.country);
+    if (!country) return fail(await unknownCountryMessage(a.country));
+    params.countryId = country.id;
+    resolved.country = `${country.name} (${country.code})`;
+    if (a.city) {
+      const cityRes = await resolveCity(country.id, a.city);
+      if (!cityRes.city) return fail(`City "${a.city}" not found in ${country.name}.`, { code: 'CITY_NOT_FOUND', suggestions: cityRes.suggestions });
+      params.cityId = cityRes.city.id;
+      resolved.city = cityRes.city.nameEn ?? null;
+    }
+  } else if (a.city) return fail('city needs a country.');
+  if (a.specialization) {
+    const spec = await resolveSpecialization(a.specialization);
+    if (!spec) return fail(`No active ENTRA specialization matches "${a.specialization}".`, { code: 'SPECIALIZATION_NOT_FOUND' });
+    params.specializationId = spec.specialization.id;
+    resolved.specialization = spec.specialization.nameEn ?? null;
+    if (spec.match !== 'exact') notes.push(`specialization resolved to "${spec.specialization.nameEn}" (${spec.match} match)`);
+  }
+  if (a.skills?.length) {
+    const s = await resolveSkillIds(a.skills);
+    if (s.resolved.length) params.skills = s.resolved.map((x) => x.id);
+    resolved.skills = s.resolved.map((x) => x.name);
+    if (s.unresolved.length) notes.push(`skills not found on ENTRA (ignored): ${s.unresolved.join(', ')}`);
+    if (!s.resolved.length) notes.push('none of the skills resolved — skill filter not applied');
+  }
+  if (!params.search && !params.skills && !params.specializationId && !params.countryId && !params.experienceLevel && !params.workLocation) {
+    return fail('Give at least one of: query, skills, specialization, country, experience, work_location.');
+  }
+
+  let r: ResumeList;
+  try {
+    r = await apiFetch<ResumeList>('/resumes', { auth: true, params });
+  } catch (e) {
+    if (isSubscription403(e)) return needsSubscription('candidates', e as ApiError);
+    throw e;
+  }
+  const candidates = (r.data ?? []).map(compactCandidate);
+  return ok({
+    total: r.total ?? candidates.length,
+    page: r.page ?? a.page ?? 1,
+    returned: candidates.length,
+    filters_resolved: resolved,
+    ...(notes.length ? { notes } : {}),
+    candidates,
+    note: CONTACT_NOTE,
+  });
+}
+
+async function runMatchCandidates(a: MatchCandidatesArgs): Promise<ToolResult> {
+  const ctx = await employerContext('candidates:read');
+  if (isCtxError(ctx)) return ctx.error;
+  await loadCountries();
+  let job: ApiJob | null = null;
+  let title: string;
+  let text: string;
+  if (a.job_id) {
+    job = await getOwnJob(a.job_id);
+    title = job.title ?? '';
+    text = [title, job.requirements ?? '', job.description ?? ''].join('\n');
+  } else if (a.job_text?.trim()) {
+    const lines = a.job_text.trim().split('\n');
+    title = lines[0].trim().slice(0, 200);
+    text = a.job_text;
+  } else return fail('Provide job_id (one of your jobs) or job_text (title on the first line, then the description).');
+
+  const skills = [...new Set([...(job ? jobSkillNames(job).map(canonicalSkill) : []), ...extractTerms(text, SKILL_DICT).map((f) => f.term)])].slice(0, 12);
+  const role = extractTerms(title, ROLE_DICT)[0]?.term ?? (roleTokens(title).join(' ') || title);
+  const jobLevelRaw = job?.experienceLevel;
+  const seniority: ExpLevel | null = isExpLevel(jobLevelRaw) ? jobLevelRaw : (detectSeniority(text)?.level ?? null);
+  const remote = job ? job.workLocation === 'remote' : /\bremote\b/i.test(text);
+  let country: Country | null = null;
+  if (job) country = countryById.get(job.country?.id ?? job.countryId ?? '') ?? null;
+  else if (a.country) {
+    country = await resolveCountry(a.country);
+    if (!country) return fail(await unknownCountryMessage(a.country));
+  }
+  if (!skills.length && !role) return fail('Could not derive skills or a role from the job. Add a clearer title or description.');
+
+  const base: Params = !remote && country && !a.include_other_countries ? { countryId: country.id } : {};
+  const queries: Array<{ label: string; params: Params }> = [];
+  if (role) queries.push({ label: `search "${role}"`, params: { ...base, search: role } });
+  const skillIds = skills.length ? await resolveSkillIds(skills.slice(0, 6)) : { resolved: [], unresolved: [] };
+  if (skillIds.resolved.length) queries.push({ label: `skills any of [${skillIds.resolved.map((s) => s.name).join(', ')}]`, params: { ...base, skills: skillIds.resolved.map((s) => s.id) } });
+  const extra = skills.find((s) => !(role && termRegex(s).test(role)));
+  if (extra && queries.length < 3) queries.push({ label: `search "${extra}"`, params: { ...base, search: extra } });
+
+  let results: ResumeList[];
+  try {
+    results = await Promise.all(queries.map((q) => apiFetch<ResumeList>('/resumes', { auth: true, params: { ...q.params, limit: 50 } })));
+  } catch (e) {
+    if (isSubscription403(e)) return needsSubscription('candidates', e as ApiError);
+    throw e;
+  }
+  const seen = new Map<string, ApiResume>();
+  for (const r of results) for (const c of r.data ?? []) if (!seen.has(c.id)) seen.set(c.id, c);
+
+  const profile: JobProfile = { skills, role, seniority, remote, country, salary: job ? fmtSalary(job) : null };
+  const ranked = [...seen.values()]
+    .map((r) => scoreCandidate(r, profile))
+    .sort((x, y) => y.score - x.score || Date.parse(y.resume.publishedAt ?? '') - Date.parse(x.resume.publishedAt ?? '') || 0)
+    .slice(0, a.limit ?? 10);
+
+  return ok({
+    job: job ? compactOwnJob(job) : { title, source: 'job_text' },
+    profile_used: {
+      role,
+      skills,
+      seniority: seniority ? EXP_LABEL[seniority] : null,
+      remote,
+      country: country ? `${country.name} (${country.code})` : null,
+      country_filter_applied: !!base.countryId,
+    },
+    queries_run: queries.map((q) => q.label),
+    candidates_considered: seen.size,
+    matches: ranked.map((s) => ({ ...compactCandidate(s.resume), fit_score: s.score, why: s.why, matched_skills: s.matched, skill_gaps: s.gaps })),
+    note: CANDIDATE_FIT_NOTE,
+  });
+}
+
 // ---------- MCP server ----------
-const server = new McpServer({ name: 'entra', version: VERSION });
+const INSTRUCTIONS = [
+  'ENTRA job platform. Candidate tools (search_jobs, match_jobs, salary_stats, companies_hiring, get_job, list_companies, prepare_application) are read-only and need no key.',
+  EMPLOYER_MODE
+    ? 'Employer mode is ON (ENTRA_API_KEY set): employer_whoami, post_job, my_jobs, update_job, close_job, job_applications, search_candidates, match_candidates act on the key\'s company. close_job needs confirm:true; post_job may return needs_subscription:true with a pricing_url.'
+    : `Employer tools are not loaded — set ENTRA_API_KEY (create a key at ${API_KEYS_URL}) to post jobs and search candidates.`,
+  'Matching is deterministic keyword scoring, never a prediction. Nothing is submitted to candidates on anyone\'s behalf.',
+].join(' ');
+const server = new McpServer({ name: 'entra', version: VERSION }, { instructions: INSTRUCTIONS });
 const RO = { readOnlyHint: true, idempotentHint: true, openWorldHint: true };
+const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
+const WRITE_IDEMPOTENT = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true };
 
 server.registerTool(
   'search_jobs',
@@ -1067,6 +2023,117 @@ server.registerTool(
   guarded(({ job_id }) => runPrepareApplication(job_id)),
 );
 
+// ---------- employer tools (registered only when ENTRA_API_KEY is set) ----------
+if (EMPLOYER_MODE) {
+  server.registerTool(
+    'employer_whoami',
+    {
+      title: 'Employer: who am I',
+      description:
+        'Identify the employer API key: company, key name/prefix, granted scopes and which employer tools are usable. Calls GET /employer/api-keys/me (cached). Start here in employer mode.',
+      inputSchema: {},
+      annotations: RO,
+    },
+    guarded(() => runWhoami()),
+  );
+
+  server.registerTool(
+    'post_job',
+    {
+      title: 'Employer: post a job',
+      description:
+        'Publish a job on ENTRA for your company (scope jobs:write). Human-friendly input: title, description, employment_type, work_location (remote/onsite/hybrid), country + city (names; resolved to ENTRA ids), optional specialization (free text, best active match), experience_level, salary band, benefits, skills, expires_in_days (default 30). Returns the public job URL, manage URL and every resolution made. If the company has no free vacancy slot, returns needs_subscription:true with pricing_url instead of an error.',
+      inputSchema: postJobShape,
+      annotations: WRITE,
+    },
+    guarded(runPostJob),
+  );
+
+  server.registerTool(
+    'my_jobs',
+    {
+      title: 'Employer: my jobs',
+      description: 'List your company\'s jobs (scope jobs:read): status active | closed | all, optional search, limit, page. Each job: status, location, salary, applications count, expiry, public + manage URLs.',
+      inputSchema: {
+        status: z.enum(['active', 'closed', 'all']).optional().describe('Default active'),
+        search: z.string().optional().describe('Title/text filter'),
+        limit: z.number().int().min(1).max(100).optional().describe('Default 20'),
+        page: z.number().int().min(1).optional(),
+      },
+      annotations: RO,
+    },
+    guarded(runMyJobs),
+  );
+
+  server.registerTool(
+    'close_job',
+    {
+      title: 'Employer: close a job',
+      description:
+        'Close (unpublish) one of your jobs (scope jobs:write). Without confirm:true it only returns a preview of the job that would be closed; with confirm:true it PATCHes isActive:false. Reversible with update_job {is_active:true}.',
+      inputSchema: {
+        job_id: z.string().describe('Job id from my_jobs / post_job'),
+        confirm: z.boolean().optional().describe('Must be true to actually close the job'),
+      },
+      annotations: DESTRUCTIVE,
+    },
+    guarded(runCloseJob),
+  );
+
+  server.registerTool(
+    'update_job',
+    {
+      title: 'Employer: update a job',
+      description:
+        'Update fields of one of your jobs (scope jobs:write): title, description, requirements, employment_type, work_location, experience_level, salary_*, benefits, internal_job_id, expires_in_days (extend), country+city, specialization, is_active (re-open/close). Only the fields you pass are changed.',
+      inputSchema: updateJobShape,
+      annotations: WRITE_IDEMPOTENT,
+    },
+    guarded(runUpdateJob),
+  );
+
+  server.registerTool(
+    'job_applications',
+    {
+      title: 'Employer: applications',
+      description:
+        'Applications to your jobs (scope applications:read): pass job_id for one job or nothing for all company jobs; optional status filter (client-side), limit, page. Shows candidate name, resume headline, cover letter and contact details exactly as ENTRA returns them — never inferred.',
+      inputSchema: {
+        job_id: z.string().optional().describe('One job (GET /jobs/:id/applications); omit for all (GET /employer/applications)'),
+        status: applicationStatusEnum.optional().describe('pending | invitation | interview | offer | rejected | withdrawn'),
+        limit: z.number().int().min(1).max(100).optional().describe('Default 20'),
+        page: z.number().int().min(1).optional(),
+      },
+      annotations: RO,
+    },
+    guarded(runJobApplications),
+  );
+
+  server.registerTool(
+    'search_candidates',
+    {
+      title: 'Employer: search candidates',
+      description:
+        'Search published resumes on ENTRA (scope candidates:read): query (title/bio text), skills[] (names → ANY match), specialization, country/city, experience, work_location/remote_only, employment_type, ready_to_relocate, expected-salary bounds, has_linkedin/has_portfolio, published_within_days, limit ≤25. Returns compact profiles with a profile URL; contact fields only when ENTRA grants access. If resume access needs a plan, returns needs_subscription:true with pricing_url.',
+      inputSchema: searchCandidatesShape,
+      annotations: RO,
+    },
+    guarded(runSearchCandidates),
+  );
+
+  server.registerTool(
+    'match_candidates',
+    {
+      title: 'Employer: match candidates to a job',
+      description:
+        'Rank candidates for one of your jobs (scope candidates:read): pass job_id (or job_text). Extracts skills/role/seniority deterministically (same extractor as match_jobs), runs 2–3 resume searches, dedupes and scores 0–100 with why[] (skills overlap, headline vs role, seniority, location/remote). Returns top N with fit_score, matched_skills, skill_gaps. Deterministic keyword matching — review profiles before contacting.',
+      inputSchema: matchCandidatesShape,
+      annotations: RO,
+    },
+    guarded(runMatchCandidates),
+  );
+}
+
 // ---------- selftest (no MCP client needed): node dist/index.js --selftest ----------
 async function selftest() {
   const text = (r: ToolResult) => r.content[0]?.text ?? '';
@@ -1107,6 +2174,12 @@ async function selftest() {
 if (process.argv.includes('--selftest')) {
   void selftest();
 } else {
+  // stderr only — stdout is the MCP transport
+  if (EMPLOYER_FLAG && !EMPLOYER_MODE) {
+    console.error(`entra-mcp: --employer given but ENTRA_API_KEY is not set — employer tools not loaded. Create a key at ${API_KEYS_URL} and export ENTRA_API_KEY.`);
+  } else if (EMPLOYER_MODE) {
+    console.error(`entra-mcp ${VERSION}: employer mode (key ${API_KEY.slice(0, 15)}…) — 8 candidate + 8 employer tools`);
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
