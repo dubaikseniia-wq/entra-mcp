@@ -1,16 +1,17 @@
 {
   "name": "entra-mcp",
-  "version": "0.3.0",
-  "description": "MCP server for ENTRA — the agent-ready job platform. Candidates: search, match and rank thousands of verified AI & tech jobs aggregated straight from company ATSs (OpenAI, Anthropic, Stripe, SpaceX…), salary stats, companies hiring, human-in-the-loop apply links. Employers (API key): post jobs, manage listings, read applications, search and match candidates.",
+  "version": "0.3.1",
+  "description": "MCP server for ENTRA \u2014 the agent-ready job platform. Candidates: search, match and rank thousands of verified AI & tech jobs aggregated straight from company ATSs (OpenAI, Anthropic, Stripe, SpaceX\u2026), salary stats, companies hiring, human-in-the-loop apply links. Employers (API key): post jobs, manage listings, read applications, search and match candidates.",
   "type": "module",
   "bin": {
     "entra-mcp": "dist/index.js"
   },
   "main": "dist/index.js",
   "files": [
-    "dist",
+    "LICENSE",
     "README.md",
-    "LICENSE"
+    "dist",
+    "server.json"
   ],
   "scripts": {
     "build": "tsc",
@@ -40,7 +41,7 @@
   ],
   "author": "ENTRA (https://entracareers.com)",
   "license": "MIT",
-  "homepage": "https://entracareers.com/developers",
+  "homepage": "https://entracareers.com/ai-agents",
   "engines": {
     "node": ">=18"
   },
@@ -58,5 +59,6 @@
   },
   "bugs": {
     "url": "https://github.com/dubaikseniia-wq/entra-mcp/issues"
-  }
+  },
+  "mcpName": "io.github.dubaikseniia-wq/entra-mcp"
 }

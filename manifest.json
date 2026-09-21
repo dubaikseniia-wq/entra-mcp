@@ -1,0 +1,68 @@
+{
+  "manifest_version": "0.2",
+  "name": "entra-mcp",
+  "display_name": "ENTRA Jobs",
+  "version": "0.3.1",
+  "description": "Verified AI & tech jobs straight from company ATSs \u2014 search, fit-score matching and apply links.",
+  "author": {
+    "name": "ENTRA",
+    "url": "https://entracareers.com"
+  },
+  "homepage": "https://entracareers.com/ai-agents",
+  "documentation": "https://github.com/dubaikseniia-wq/entra-mcp#readme",
+  "support": "https://github.com/dubaikseniia-wq/entra-mcp/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/dist/index.js"
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "search_jobs",
+      "description": "Search verified AI & tech jobs"
+    },
+    {
+      "name": "get_job",
+      "description": "Full job details + apply link"
+    },
+    {
+      "name": "match_jobs",
+      "description": "Skills \u2192 best-fitting roles with fit score"
+    },
+    {
+      "name": "list_companies",
+      "description": "Companies hiring on ENTRA"
+    },
+    {
+      "name": "prepare_application",
+      "description": "Human-in-the-loop apply link + checklist"
+    }
+  ],
+  "keywords": [
+    "jobs",
+    "careers",
+    "hiring",
+    "ai-jobs",
+    "ats"
+  ],
+  "license": "MIT",
+  "privacy_policies": [
+    "https://entracareers.com/privacy-policy"
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=18"
+    }
+  }
+}

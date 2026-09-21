@@ -173,3 +173,8 @@ npm run smoke:employer  # employer mode against an in-process mock of the employ
 Environment: `ENTRA_API_KEY` (enables employer mode), `ENTRA_API_URL` (default `https://entracareers.com/api`), `ENTRA_SITE_URL` (default `https://entracareers.com`).
 
 MIT © ENTRA
+
+
+## Privacy Policy
+
+This server runs locally and sends only your tool inputs to the public ENTRA API (https://entracareers.com/api). No telemetry, no third-party services. Employer mode uses your API key from the `ENTRA_API_KEY` environment variable and sends it only to ENTRA employer endpoints. Full policy: https://entracareers.com/privacy-policy
