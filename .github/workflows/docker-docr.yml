@@ -1,0 +1,24 @@
+name: Build & push image to DigitalOcean Container Registry
+on:
+  push:
+    branches: [main]
+    paths: ["src/**", "dist/**", "package.json", "package-lock.json", "Dockerfile", ".dockerignore", ".github/workflows/docker-docr.yml"]
+  workflow_dispatch:
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - name: Log in to DOCR
+        run: doctl registry login --expiry-seconds 1200
+      - name: Build image
+        run: |
+          docker build -t registry.digitalocean.com/entra/entra-mcp:latest -t registry.digitalocean.com/entra/entra-mcp:${GITHUB_SHA::7} .
+      - name: Push image
+        run: |
+          docker push registry.digitalocean.com/entra/entra-mcp:latest
+          docker push registry.digitalocean.com/entra/entra-mcp:${GITHUB_SHA::7}
