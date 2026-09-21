@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.dubaikseniia-wq/entra-mcp",
   "title": "ENTRA Jobs",
-  "description": "Verified AI & tech jobs from company ATSs: search, fit-score matching, companies hiring. Read-only.",
+  "description": "Verified AI & tech jobs from company ATSs: search, fit-score matching, salary stats; employer mode posts jobs.",
   "websiteUrl": "https://entracareers.com/ai-agents",
   "repository": {
     "url": "https://github.com/dubaikseniia-wq/entra-mcp",
@@ -19,6 +19,12 @@
         "type": "stdio"
       },
       "environmentVariables": [
+        {
+          "name": "ENTRA_API_KEY",
+          "description": "Employer API key (entra_live_\u2026) from https://entracareers.com/employer/profile?tab=api-keys \u2014 enables employer tools",
+          "isRequired": false,
+          "isSecret": true
+        },
         {
           "name": "ENTRA_API_URL",
           "description": "Override the ENTRA API base URL (default https://entracareers.com/api)",
