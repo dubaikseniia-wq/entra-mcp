@@ -1,0 +1,16 @@
+.git
+.gitignore
+node_modules
+dist
+dist-bundle
+*.mcpb
+*.log
+.DS_Store
+scripts
+icon.png
+glama.json
+manifest.json
+server.json
+README.md
+Dockerfile
+.dockerignore

@@ -8,13 +8,13 @@
     "url": "https://github.com/dubaikseniia-wq/entra-mcp",
     "source": "github"
   },
-  "version": "0.3.1",
+  "version": "0.4.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "entra-mcp",
-      "version": "0.3.1",
+      "version": "0.4.0",
       "transport": {
         "type": "stdio"
       },
@@ -29,6 +29,21 @@
           "name": "ENTRA_API_URL",
           "description": "Override the ENTRA API base URL (default https://entracareers.com/api)",
           "isRequired": false
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.entracareers.com/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Optional \u2014 employer mode. Value \"Bearer entra_live_\u2026\" with a key from https://entracareers.com/employer/profile?tab=api-keys. Omit for candidate tools.",
+          "isRequired": false,
+          "isSecret": true,
+          "placeholder": "Bearer entra_live_\u2026"
         }
       ]
     }

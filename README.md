@@ -1,6 +1,6 @@
 # ENTRA MCP — the first agent-ready job platform
 
-Let your AI find your job. This MCP server connects Claude, Cursor, Windsurf or any MCP client to **ENTRA** — thousands of verified AI & tech jobs aggregated straight from company hiring systems (OpenAI, Anthropic, SpaceX, Stripe + 300 more). **Zero ghost jobs.**
+Let your AI find your job. This MCP server connects Claude, ChatGPT, Cursor, Windsurf or any MCP client — locally via `npx` or hosted at `https://mcp.entracareers.com/mcp` — to **ENTRA** — thousands of verified AI & tech jobs aggregated straight from company hiring systems (OpenAI, Anthropic, SpaceX, Stripe + 300 more). **Zero ghost jobs.**
 
 Agents search, match, rank and prepare. **Humans decide and apply** — no spam, no auto-submission.
 
@@ -32,6 +32,26 @@ claude mcp add entra -- node "/path/to/entra-mcp/dist/index.js"
 Requires Node 18+. No API key needed for candidate tools — they are read-only against the public ENTRA API. Employers add one env var, see [Employer mode](#employer-mode-api-key).
 
 Then just ask: *"Find me remote ML engineer roles paying $200K+, tell me which companies are hiring most, and prepare an application for the best fit."*
+
+## Hosted endpoint (no install)
+
+The same server runs at **`https://mcp.entracareers.com/mcp`** (MCP Streamable HTTP). Nothing to install, no account for candidate tools.
+
+| Client | How |
+|---|---|
+| **ChatGPT** | Settings → Connectors → Create → MCP Server URL `https://mcp.entracareers.com/mcp`, authentication "None" (custom connectors need a ChatGPT plan that supports them, e.g. Plus/Pro/Business/Enterprise with developer mode) |
+| **claude.ai** | Settings → Connectors → Add custom connector → URL `https://mcp.entracareers.com/mcp` |
+| **Cursor** (`.cursor/mcp.json`) | `{ "mcpServers": { "entra": { "url": "https://mcp.entracareers.com/mcp" } } }` |
+| **Claude Code** | `claude mcp add --transport http entra https://mcp.entracareers.com/mcp` |
+| **Gemini CLI / Smithery / any Streamable HTTP client** | point it at the URL above |
+
+**Employer mode over HTTP:** send your key on every request as `Authorization: Bearer entra_live_…` and the 8 employer tools appear for that request (Cursor: add `"headers": { "Authorization": "Bearer entra_live_…" }` next to `url`). ChatGPT and claude.ai connectors cannot send custom headers today, so there you get candidate mode — employers use the local `npx` setup with `ENTRA_API_KEY` ([Employer mode](#employer-mode-api-key)).
+
+How the hosted server behaves:
+- Stateless: every request stands alone (no sessions, no `Mcp-Session-Id`), so it scales and redeploys without breaking clients. `GET /mcp` and `DELETE /mcp` answer `405` as the spec allows.
+- The `Authorization` header is used for that one request and is neither stored nor logged. No key is read from the server's environment.
+- Rate limit 120 requests/minute per client IP on `/mcp`; request bodies up to 1 MB; CORS open for browser-based agents. Health: `GET /healthz`.
+- Same honesty rules as below — the hosted server is just another transport for the identical tools.
 
 ## Tools
 
@@ -158,7 +178,7 @@ AI matching is live via `match_jobs` — connect your profile at [entracareers.c
 
 ## Roadmap
 - Application status changes and invitations through API keys (today: read-only applications).
-- Hosted (remote) MCP endpoint.
+- OAuth on the hosted endpoint, so ChatGPT / claude.ai connectors can use employer mode without a local install.
 
 Employers: [entracareers.com/employer/pricing](https://entracareers.com/employer/pricing) — Founding plan from $10.
 
@@ -172,13 +192,18 @@ npm run build           # tsc → dist/
 npm run selftest        # calls the live API directly, no MCP client (candidate tools)
 npm run smoke           # spawns the server over stdio with the MCP SDK client and exercises every candidate tool (live API)
 npm run smoke:employer  # employer mode against an in-process mock of the employer API (no network, no real key)
+npm run smoke:http      # starts dist/http.js on a random port and drives it with the SDK's Streamable HTTP client (live API + fake employer key)
+npm run start:http      # hosted transport locally: http://localhost:8080/mcp (PORT, HOST, RATE_LIMIT_PER_MINUTE, TRUST_PROXY, MCP_ALLOWED_HOSTS)
 npm run bundle          # builds dist-bundle/entra-mcp.mcpb (Claude Desktop extension / Smithery local bundle) from manifest.json
+docker build -t entra-mcp . && docker run -p 8080:8080 entra-mcp   # the image the hosted endpoint runs (node:22-alpine, dist/http.js)
 ```
-Environment: `ENTRA_API_KEY` (enables employer mode), `ENTRA_API_URL` (default `https://entracareers.com/api`), `ENTRA_SITE_URL` (default `https://entracareers.com`).
+Layout: `src/server.ts` builds the server (`createServer({ apiKey? })` — tools + per-request key context), `src/index.ts` is the stdio entry (`npx entra-mcp`), `src/http.ts` the hosted Streamable HTTP entry.
+
+Environment: `ENTRA_API_KEY` (stdio only — enables employer mode), `ENTRA_API_URL` (default `https://entracareers.com/api`), `ENTRA_SITE_URL` (default `https://entracareers.com`).
 
 MIT © ENTRA
 
 
 ## Privacy Policy
 
-This server runs locally and sends only your tool inputs to the public ENTRA API (https://entracareers.com/api). No telemetry, no third-party services. Employer mode uses your API key from the `ENTRA_API_KEY` environment variable and sends it only to ENTRA employer endpoints. Full policy: https://entracareers.com/privacy-policy
+This server sends only your tool inputs to the public ENTRA API (https://entracareers.com/api). No telemetry, no third-party services. Locally (`npx entra-mcp`) employer mode uses your API key from the `ENTRA_API_KEY` environment variable; on the hosted endpoint (https://mcp.entracareers.com/mcp) the key comes from the `Authorization` header of each request, is forwarded only to ENTRA employer endpoints, and is never stored or logged. The hosted server keeps no sessions or request history beyond a short access log (method, tool name, status, timing). Full policy: https://entracareers.com/privacy-policy
