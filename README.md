@@ -11,6 +11,9 @@ Agents search, match, rank and prepare. **Humans decide and apply** — no spam,
 claude mcp add entra -- npx -y entra-mcp
 ```
 
+**Claude Desktop — one-click extension (.mcpb)**
+Download [`entra-mcp.mcpb`](https://github.com/dubaikseniia-wq/entra-mcp/releases/latest/download/entra-mcp.mcpb) and open it with Claude Desktop (Settings → Extensions → Install from file). No Node install needed. Employers can paste their API key in the extension settings.
+
 **Claude Desktop** (`claude_desktop_config.json`), **Cursor** (`.cursor/mcp.json`), **Windsurf** (`~/.codeium/windsurf/mcp_config.json`)
 ```json
 {
@@ -169,6 +172,7 @@ npm run build           # tsc → dist/
 npm run selftest        # calls the live API directly, no MCP client (candidate tools)
 npm run smoke           # spawns the server over stdio with the MCP SDK client and exercises every candidate tool (live API)
 npm run smoke:employer  # employer mode against an in-process mock of the employer API (no network, no real key)
+npm run bundle          # builds dist-bundle/entra-mcp.mcpb (Claude Desktop extension / Smithery local bundle) from manifest.json
 ```
 Environment: `ENTRA_API_KEY` (enables employer mode), `ENTRA_API_URL` (default `https://entracareers.com/api`), `ENTRA_SITE_URL` (default `https://entracareers.com`).
 

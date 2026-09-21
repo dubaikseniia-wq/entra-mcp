@@ -18,14 +18,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 const API = (process.env.ENTRA_API_URL ?? 'https://entracareers.com/api').replace(/\/+$/, '');
 const SITE = (process.env.ENTRA_SITE_URL ?? 'https://entracareers.com').replace(/\/+$/, '');
 const UTM = 'utm_source=agent&utm_medium=mcp';
 const SOURCE_NOTE = 'ENTRA — verified roles aggregated from company ATSs. Finds and ranks; you apply.';
 
 // Employer mode: the key comes from the environment only (never from argv — argv leaks into process lists).
-const API_KEY = (process.env.ENTRA_API_KEY ?? '').trim();
+const RAW_API_KEY = (process.env.ENTRA_API_KEY ?? '').trim();
+// MCPB hosts may hand over an unresolved "${user_config.…}" placeholder when the optional key is left blank — treat it as unset.
+const API_KEY = RAW_API_KEY.startsWith('${') ? '' : RAW_API_KEY;
 const EMPLOYER_FLAG = process.argv.includes('--employer');
 const EMPLOYER_MODE = API_KEY.length > 0;
 const API_KEYS_URL = `${SITE}/employer/profile?tab=api-keys`;

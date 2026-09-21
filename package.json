@@ -1,7 +1,7 @@
 {
   "name": "entra-mcp",
   "version": "0.3.1",
-  "description": "MCP server for ENTRA \u2014 the agent-ready job platform. Candidates: search, match and rank thousands of verified AI & tech jobs aggregated straight from company ATSs (OpenAI, Anthropic, Stripe, SpaceX\u2026), salary stats, companies hiring, human-in-the-loop apply links. Employers (API key): post jobs, manage listings, read applications, search and match candidates.",
+  "description": "MCP server for ENTRA — the agent-ready job platform. Candidates: search, match and rank thousands of verified AI & tech jobs aggregated straight from company ATSs (OpenAI, Anthropic, Stripe, SpaceX…), salary stats, companies hiring, human-in-the-loop apply links. Employers (API key): post jobs, manage listings, read applications, search and match candidates.",
   "type": "module",
   "bin": {
     "entra-mcp": "dist/index.js"
@@ -20,7 +20,8 @@
     "smoke": "node scripts/smoke.mjs",
     "prepublishOnly": "npm run build",
     "smoke:employer": "node scripts/smoke-employer.mjs",
-    "test": "npm run selftest && npm run smoke && npm run smoke:employer"
+    "test": "npm run selftest && npm run smoke && npm run smoke:employer",
+    "bundle": "sh scripts/bundle.sh"
   },
   "keywords": [
     "mcp",

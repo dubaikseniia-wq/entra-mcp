@@ -1,12 +1,18 @@
 {
-  "manifest_version": "0.2",
+  "manifest_version": "0.3",
   "name": "entra-mcp",
   "display_name": "ENTRA Jobs",
   "version": "0.3.1",
-  "description": "Verified AI & tech jobs straight from company ATSs \u2014 search, fit-score matching and apply links.",
+  "description": "Verified AI & tech jobs straight from company ATSs — search, fit-score matching, salary stats and apply links. Employers (API key): post jobs, manage listings, search candidates.",
+  "long_description": "**ENTRA Jobs** connects Claude to [ENTRA](https://entracareers.com), the agent-ready job platform. Jobs are ingested directly from employer hiring systems (Greenhouse, Lever, Ashby and others), so every listing is live and verified — no scraped or ghost jobs.\n\n**For candidates (no account needed):** search thousands of AI & tech roles at OpenAI, Anthropic, Stripe, SpaceX and 300+ other companies; filter by location, country, remote, salary and experience; match a resume or skill list to the best-fitting roles with an explainable fit score; check salary bands where employers publish them; see which companies are hiring for a role; get a direct apply link with a checklist. ENTRA finds and ranks — the human applies. Nothing is auto-submitted.\n\n**For employers (optional API key):** post and manage jobs, read applications, search and match published candidate profiles for your company. Create a key at https://entracareers.com/employer/profile?tab=api-keys and paste it into the extension settings.\n\n**Privacy:** the server runs locally and sends only your tool inputs to the ENTRA API. No telemetry, no third-party services. Policy: https://entracareers.com/privacy-policy",
   "author": {
     "name": "ENTRA",
+    "email": "support@entracareers.com",
     "url": "https://entracareers.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dubaikseniia-wq/entra-mcp.git"
   },
   "homepage": "https://entracareers.com/ai-agents",
   "documentation": "https://github.com/dubaikseniia-wq/entra-mcp#readme",
@@ -19,37 +25,50 @@
       "command": "node",
       "args": [
         "${__dirname}/dist/index.js"
-      ]
+      ],
+      "env": {
+        "ENTRA_API_KEY": "${user_config.entra_api_key}"
+      }
+    }
+  },
+  "user_config": {
+    "entra_api_key": {
+      "type": "string",
+      "title": "ENTRA employer API key (optional)",
+      "description": "Only for employers. Leave blank for job search. Create a key (entra_live_…) at https://entracareers.com/employer/profile?tab=api-keys to unlock post_job, my_jobs, update_job, close_job, job_applications, search_candidates and match_candidates.",
+      "sensitive": true,
+      "required": false
     }
   },
   "tools": [
-    {
-      "name": "search_jobs",
-      "description": "Search verified AI & tech jobs"
-    },
-    {
-      "name": "get_job",
-      "description": "Full job details + apply link"
-    },
-    {
-      "name": "match_jobs",
-      "description": "Skills \u2192 best-fitting roles with fit score"
-    },
-    {
-      "name": "list_companies",
-      "description": "Companies hiring on ENTRA"
-    },
-    {
-      "name": "prepare_application",
-      "description": "Human-in-the-loop apply link + checklist"
-    }
+    { "name": "search_jobs", "description": "Search verified AI & tech jobs with filters (work location, country, company, salary, experience, recency); rank by date, salary or fit" },
+    { "name": "get_job", "description": "Full details of one job: description, requirements, skills, salary band, company, apply link" },
+    { "name": "list_companies", "description": "Companies hiring on ENTRA with open-role counts and profile links" },
+    { "name": "match_jobs", "description": "Resume text or skills → ranked roles with an explainable fit score, matched skills and skill gaps" },
+    { "name": "match_profile", "description": "Backward-compatible alias of match_jobs (skills[] + role_hint)" },
+    { "name": "salary_stats", "description": "Salary statistics for a role from listings that publish a band: min / p25 / median / p75 / max per currency" },
+    { "name": "companies_hiring", "description": "Which companies are hiring for a role right now, with open-role counts and sample titles" },
+    { "name": "prepare_application", "description": "Direct apply link plus a short checklist — the human reviews and applies, nothing is auto-submitted" },
+    { "name": "employer_whoami", "description": "Employer mode: identify the API key — company, scopes and usable employer tools" },
+    { "name": "post_job", "description": "Employer mode: publish a job for your company (title, description, location, salary band, skills…)" },
+    { "name": "my_jobs", "description": "Employer mode: list your company's jobs (active / closed / all) with application counts and manage URLs" },
+    { "name": "update_job", "description": "Employer mode: update fields of one of your jobs (only the fields you pass are changed)" },
+    { "name": "close_job", "description": "Employer mode: close (unpublish) one of your jobs — preview first, requires confirm:true" },
+    { "name": "job_applications", "description": "Employer mode: applications to your jobs with candidate details exactly as ENTRA returns them" },
+    { "name": "search_candidates", "description": "Employer mode: search published candidate profiles on ENTRA by query, skills, location, experience" },
+    { "name": "match_candidates", "description": "Employer mode: rank candidates for one of your jobs with an explainable fit score" }
   ],
   "keywords": [
     "jobs",
     "careers",
     "hiring",
     "ai-jobs",
-    "ats"
+    "tech-jobs",
+    "ats",
+    "recruiting",
+    "salary",
+    "job-search",
+    "entra"
   ],
   "license": "MIT",
   "privacy_policies": [
