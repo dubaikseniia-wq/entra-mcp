@@ -1,0 +1,12 @@
+import { Client } from "/Users/ksenia/Claude Code Workspace/ENTRA MCP/entra-mcp/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js";
+import { StdioClientTransport } from "/Users/ksenia/Claude Code Workspace/ENTRA MCP/entra-mcp/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js";
+import fs from "node:fs";
+const W = process.argv[2];
+const t = new StdioClientTransport({ command: process.execPath, args: ["dist/index.js", "--employer"], env: { ...process.env, ENTRA_API_KEY: "entra_live_schema_only" } });
+const c = new Client({ name: "schema-dump", version: "0" }); await c.connect(t);
+const tools = (await c.listTools()).tools; await c.close();
+const m = JSON.parse(fs.readFileSync(`${W}/manifest.json`, "utf8"));
+m.tools = tools.map(x => ({ name: x.name, description: x.description, inputSchema: x.inputSchema, ...(x.annotations ? { annotations: x.annotations } : {}) }));
+fs.writeFileSync(`${W}/manifest.json`, JSON.stringify(m, null, 2) + "\n");
+console.log("Smithery-вариант манифеста: tools", m.tools.length, "с inputSchema", m.tools.filter(x => x.inputSchema?.type === "object").length);
+process.exit(0);
